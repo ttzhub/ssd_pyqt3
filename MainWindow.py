@@ -98,6 +98,15 @@ def decode_preds(obj_names, preds, w, h):
 
 
 def detector_process(img_share, img_shape, process_flg, img_get_flg, res_queue):
+    """
+    SSD检测子进程目标函数
+    :param img_share: 待检测图像数据，共享内存
+    :param img_shape: 待检测图像的大小 (h, w)
+    :param process_flg: 子进程状态量  0：退出检测进程；非0：保持检测
+    :param img_get_flg: 共享图像内存 的状态量     0：子进程占用共享内存   1：主进程占有内存
+    :param res_queue: 返回检测结果的通道
+    :return:
+    """
     # 初始化SSD
     weight_path = './ssd/weights/weights_SSD300.hdf5'
     weight_path = os.path.normpath(os.path.abspath(weight_path))
@@ -108,30 +117,28 @@ def detector_process(img_share, img_shape, process_flg, img_get_flg, res_queue):
     include_class = obj_names
     ssd = SSD_test(weight_path=weight_path, class_nam_list=obj_names)
 
-    # 通知UI模型加载成功
+    # 通知UI 模型加载成功
     res_queue.put((3, '模型加载成功'))
 
     # 构建检测循环
     while True:
         # print('process_flg:{}  img_get_flg:{}'.format(process_flg.value, img_get_flg.value))
-        # 判断检测器状态
+        # 判断检测器状态，是否退出
         if process_flg.value == 0:
             print('安全退出检测进程！')
-            # self.res_queue.put((0, '检测进程已安全退出！'))
+            res_queue.put((0, '检测进程已安全退出！'))
             break
 
-        # 判断共享内存当前状态
+        # 判断共享内存当前状态是否可以安全读取数据
         if img_get_flg.value == 0:
             # print('开始检测！')
             try:
                 img = np.array(img_share[:], dtype=np.uint8)
                 img_scr = np.reshape(img, (img_shape[0], img_shape[1], 3))
 
-                # 预处理图片
-
-                # 检测
+                # SSD检测
                 preds = ssd.Predict(img_scr)
-                # 过滤
+                # 结果过滤
                 preds = filter(obj_names, preds, inclued_class=include_class)
 
                 h, w = img_shape[:2]
@@ -144,7 +151,7 @@ def detector_process(img_share, img_shape, process_flg, img_get_flg, res_queue):
                 print('图片检测失败')
                 res_queue.put((2, '当前图像检测失败!'))
             finally:
-                # 释放图像共享内存占用
+                # 释放图像共享内存占用，让主进程写入新的图像
                 img_get_flg.value = 1
 
 
@@ -181,19 +188,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                           'Sheep', 'Sofa', 'Train', 'Tvmonitor']
         # 需要显示的目标list， 用于过滤
         self.include_class = self.obj_names
+
         # 检测子进程
         self.queue = Queue()
-        # self.detector_process = SSD_detector(ssd_weight=self.weight_path,
-        #                                      obj_names=self.obj_names,
-        #                                      include_class=self.include_class,
-        #                                      img_shape=self.img_shape,
-        #                                      res_queue=self.queue)
         # 多进程之间的共享图片内存
         self.img_share = RawArray('I', self.img_shape[0] * self.img_shape[1] * 3)
         # 标识当前进程的状态，非0：保持检测；0：停止检测
         self.process_flg = RawValue('I', 1)
         # 当前图像共享内存 img_share 的状态，非0：主进程使用中；0：子进程使用中
         self.img_get_flg = RawValue('I', 1)
+        # 创建检测子进程
         self.detector_process = Process(target=detector_process,
                                         args=(self.img_share,
                                               self.img_shape,
@@ -203,13 +207,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.detector_process.start()
 
 
-        # 接收线程
+        # 接收检测结果的线程
         self.recv_thread = Recv_res(parent=self, queue=self.queue)
         # 连接信号
         self.recv_thread.res_signal.connect(self.show_res)
         self.recv_thread.start()
 
-        # 视频文件路径
+        # 视频流URL
         self.camera_index = 0
         self.FPS = None
 
@@ -224,7 +228,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.pushButton_pause.setEnabled(False)
         self.lineEdit_cameraIndex.setEnabled(False)
 
-        # 暂停
+        # 暂停初始化为不暂停
         self.pause = False
 
 
